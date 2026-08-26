@@ -18,7 +18,6 @@
 
 - `src/`：Cloudflare Worker、Durable Objects、Microsoft OAuth 与兼容 API 实现。
 - `web/`：同域管理后台静态资源。
-- `test/`：Workers/Miniflare 回归测试。
 - `testdata/`：脱敏的 SignalR 协议回归夹具。
 - `scripts/`：管理后台契约检查、候选环境功能回归和 soak 测试。
 
@@ -260,7 +259,6 @@ Remove-Item Env:M365_API_KEY -ErrorAction SilentlyContinue
 
 ```powershell
 npm run typecheck
-npm test -- --run
 npm run deploy:dry
 npx wrangler secret list
 npx wrangler deployments list
@@ -375,7 +373,6 @@ Invoke-RestMethod -Method Post -Uri "https://你的域名/v1/messages" -Headers 
 
 ```powershell
 npm run typecheck
-npm test -- --run
 npm run deploy:dry
 npx wrangler secret list
 npx wrangler deployments list

@@ -44,6 +44,19 @@ Cloudflare KV 是最终一致存储，因此新建和刷新账号时会先在 `T
 - Chat 与 Responses 的流式和非流式响应，5 秒保活、明确成功/失败终态与 `[DONE]`。
 - 长任务使用同一逻辑请求截止时间：从收到请求起最长 10 分钟，排队、一次有界重连和上游读取共享该预算，不会因重试叠加成无限任务。流式期间使用 5 秒 SSE 保活，超时会返回明确失败终态。
 - Responses `previous_response_id`、`prompt_cache_key`、客户端 thread/session/root-turn 标识和 conversation 会话续接；稳定键按 API 凭据隔离并哈希存储。
+
+### 长对话中的本地工具执行边界（CF 版本）
+
+Cloudflare Worker 只是 M365 上游中继，**不具备 Linux 容器、Shell、桌面或任何
+Windows 文件系统访问能力**。目录读取、文件修改、命令执行等动作必须由发起请求的
+本地客户端（例如 OpenCode 的 Windows 工具）完成。每一次续接请求都要继续提交完整的
+`tools` 和 `tool_choice` 字段，并原样转发上一轮的工具结果；不能只在首轮提交工具定义。
+
+客户端应固定使用 Windows 本地执行配置，并在执行前检查工作目录是 `C:\\...` 或 UNC
+路径。若续接请求发现工具列表丢失，CF 版本现在会返回有界的
+`client tool runtime unavailable` 终止提示，不会默默改用 Linux/云端 Shell；客户端应
+重新发送带完整本地工具声明的请求。流式响应还带有
+`X-M365-Execution-Environment: cloudflare-worker-relay`，可据此拒绝任何远端容器回退。
 - Responses 别名保留有界：单个上游 conversation 最多保留最新 64 个 response alias，单租户最多 512 个，alias 的可解析时间窗为 7 天；稳定会话键不参与这个别名数量淘汰。
 - 函数工具 `auto`、`required` 和指定函数；原生/文本工具调用统一执行参数 Schema 校验，工具结果按 `call_id` 校验并只允许消费一次。
 - 程序化工具循环保护：相同调用指纹、重复失败、重复结果、pending 重复、调用 ID 重放和工具轮次上限都会在再次下发前熔断；跨 Responses alias 只持久化不可逆指纹，不保存原始工具参数或结果。

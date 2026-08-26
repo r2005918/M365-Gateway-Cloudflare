@@ -41,6 +41,7 @@ const LOGICAL_REQUEST_TIMEOUT_MS = 10 * 60_000;
 const DEFAULT_REQUEST_TOKEN_BUDGET = 96_000;
 const PROMPT_PROTOCOL_RESERVE_TOKENS = 2_048;
 const MIN_USABLE_PROMPT_TOKENS = 8_192;
+const CLIENT_TOOL_UNAVAILABLE_SENTINEL = "CLIENT_TOOL_UNAVAILABLE";
 
 /** Count semantic request fields without serializing or retaining the body. */
 function observeMetricValues(metrics: RequestMetricTracker | undefined, ...values: unknown[]): void {
@@ -1534,6 +1535,18 @@ async function resolveAssistantTurn(
   );
   observeMetricResult(metrics, result);
 
+  // The ChatHub prompt is deliberately fail-closed when the caller's local
+  // tool channel disappears during a long continuation. Do not expose the
+  // sentinel as an ordinary answer: returning a terminal, retryable message
+  // prevents a model variant from silently substituting a hosted Linux/shell
+  // environment for the caller's Windows tools.
+  if (routingEnabled && result.text.trim() === CLIENT_TOOL_UNAVAILABLE_SENTINEL) {
+    return {
+      kind: "terminal",
+      text: toolRecoveryTermination("client tool runtime unavailable; resend the request with the local Windows tool channel"),
+    };
+  }
+
   if (routingEnabled) {
     const names = toolNames(tools);
     const explicit = typeof toolChoice === "object" && toolChoice
@@ -1688,6 +1701,9 @@ function streamHeaders(): HeadersInit {
     "Cache-Control": "no-cache, no-store",
     Connection: "keep-alive",
     "X-Accel-Buffering": "no",
+    // Explicitly identify the execution boundary so clients can pin local
+    // Windows tool execution and reject hosted/container fallbacks.
+    "X-M365-Execution-Environment": "cloudflare-worker-relay",
   };
 }
 

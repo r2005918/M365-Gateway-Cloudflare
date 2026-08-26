@@ -1,0 +1,50 @@
+{
+  "$schema": "node_modules/wrangler/config-schema.json",
+  "name": "m365-gateway-cloudflare",
+  "main": "src/index.ts",
+  "compatibility_date": "2026-08-22",
+  "version_metadata": { "binding": "CF_VERSION_METADATA" },
+  "workers_dev": true,
+  "preview_urls": true,
+  "assets": {
+    "directory": "web",
+    "binding": "ASSETS",
+    "run_worker_first": true,
+    "html_handling": "none",
+    "not_found_handling": "none"
+  },
+  "kv_namespaces": [
+    {
+      "binding": "SENSITIVE_KV",
+      "id": "00000000000000000000000000000000"
+    }
+  ],
+  "durable_objects": {
+    "bindings": [
+      { "name": "TENANTS", "class_name": "TenantState" },
+      { "name": "CHATS", "class_name": "ChatSession" }
+    ]
+  },
+  "migrations": [
+    { "tag": "v1", "new_sqlite_classes": ["TenantState", "ChatSession"] }
+  ],
+  "vars": {
+    "ENVIRONMENT": "production",
+    "TENANT_NAME": "default",
+    "BOOTSTRAP_ADMIN_PASSWORD": "admin888",
+    "MAX_ACCOUNTS": "40",
+    "MIGRATION_ENABLED": "false",
+    "MIGRATION_CANDIDATE_TAG": "account-migration-candidate",
+    "M365_CLIENT_ID": "c0ab8ce9-e9a0-42e7-b064-33d422df41f1",
+    "M365_AUTHORITY": "https://login.microsoftonline.com/common",
+    "M365_REDIRECT_URI": "https://login.microsoftonline.com/common/oauth2/nativeclient",
+    "M365_SCOPE": "openid profile offline_access https://substrate.office.com/sydney/M365Chat.Read https://substrate.office.com/sydney/sydney.readwrite"
+  },
+  "secrets": {
+    "required": ["DATA_ENCRYPTION_KEY"]
+  },
+  "observability": {
+    "enabled": true,
+    "head_sampling_rate": 1
+  }
+}

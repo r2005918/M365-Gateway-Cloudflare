@@ -1,0 +1,2 @@
+# 32 random bytes encoded as base64url. Never commit the real value.
+DATA_ENCRYPTION_KEY="replace-with-32-byte-base64url-key"

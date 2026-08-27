@@ -1,3 +1,5 @@
+import { classifyCompletionActions, type OperationalAction } from "./completion-evidence";
+
 const textEncoder = new TextEncoder();
 
 export const DEFAULT_MAX_TOOL_ROUNDS = 32;
@@ -42,6 +44,8 @@ export interface ToolCallRecord {
   normalizedArguments: string;
   fingerprint: string;
   protocol: ToolProtocol;
+  /** Sanitized operation labels; never contains raw arguments or output. */
+  operationHints?: OperationalAction[];
 }
 
 export interface CompletedToolEvidence extends ToolCallRecord {
@@ -93,6 +97,8 @@ export interface ToolLedgerSnapshotEntry {
   completedCount?: number;
   /** SHA-256 identities only; raw tool errors are never persisted. */
   failureFingerprints?: string[];
+  /** Non-sensitive action categories retained for long-task completion evidence. */
+  actions?: OperationalAction[];
 }
 
 export interface ProposedToolCall {
@@ -512,6 +518,7 @@ function addCompletedSnapshots(state: MutableLedgerState, snapshots: ToolLedgerS
     const failureFingerprints = Array.isArray(snapshot.failureFingerprints)
       ? [...new Set(snapshot.failureFingerprints.filter((value): value is string => typeof value === "string" && /^sha256:[a-f0-9]{64}$/u.test(value)))]
       : [];
+    const operationHints = classifyCompletionActions({ operationHints: snapshot.actions });
     for (const failureFingerprint of failureFingerprints) state.failureSignatures.add(`${fingerprint}\u0000${failureFingerprint}`);
     for (let occurrence = 0; occurrence < completedCount; occurrence += 1) {
       const callId = `persisted_${index}_${occurrence}_${fingerprint.slice(7, 19)}`;
@@ -522,6 +529,7 @@ function addCompletedSnapshots(state: MutableLedgerState, snapshots: ToolLedgerS
         normalizedArguments: "{}",
         fingerprint,
         protocol: "seed",
+        ...(operationHints.length > 0 ? { operationHints } : {}),
       };
       state.callsById.set(callId, call);
       state.calls.push(call);
@@ -657,6 +665,7 @@ export function completedToolSnapshots(ledger: ToolLedger, maximum = 32): ToolLe
   const unique = new Map<string, ToolLedgerSnapshotEntry>();
   for (const item of ledger.completed) {
     const previous = unique.get(item.fingerprint);
+    const actions = [...new Set([...(previous?.actions ?? []), ...classifyCompletionActions(item)])];
     const failureFingerprints = [...new Set([
       ...(previous?.failureFingerprints ?? []),
       ...(item.failureFingerprint ? [item.failureFingerprint] : []),
@@ -668,6 +677,7 @@ export function completedToolSnapshots(ledger: ToolLedger, maximum = 32): ToolLe
       failed: Boolean(previous?.failed || item.failed),
       completedCount: Math.min(HARD_MAX_TOOL_ROUNDS, (previous?.completedCount ?? 0) + 1),
       ...(failureFingerprints.length > 0 ? { failureFingerprints } : {}),
+      ...(actions.length > 0 ? { actions } : {}),
     });
   }
   return [...unique.values()].slice(-limit);

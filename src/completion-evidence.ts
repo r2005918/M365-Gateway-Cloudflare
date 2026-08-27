@@ -17,6 +17,7 @@ export type CompletionAction =
   | "complete";
 
 export type CompletionEvidenceStatus = "success" | "failure" | "unknown" | "pending";
+export type OperationalAction = Exclude<CompletionAction, "complete">;
 
 /**
  * A deliberately small structural type. ToolLedger is assignable to this
@@ -27,6 +28,8 @@ export interface CompletionEvidenceRecord {
   name?: string;
   arguments?: unknown;
   normalizedArguments?: string;
+  /** Sanitized action labels restored from a prior Responses turn. */
+  operationHints?: readonly OperationalAction[];
   result?: unknown;
   failed?: boolean;
   status?: Exclude<CompletionEvidenceStatus, "pending">;
@@ -85,8 +88,6 @@ export interface CompletionEvidenceDecision {
   replacementText?: string;
 }
 
-type OperationalAction = Exclude<CompletionAction, "complete">;
-
 const operationalActions: readonly OperationalAction[] = [
   "deploy",
   "fix",
@@ -108,53 +109,53 @@ const failureSignal = /(?:exit\s*(?:code|status)?\s*[:=]?\s*[1-9]\d*|\berror\b|\
  */
 const operationPatterns: Readonly<Record<OperationalAction, readonly RegExp[]>> = {
   deploy: [
-    /(?:^|[_:\s-])(?:deploy|deployment|release)(?:$|[_:\s-])/iu,
+    /(?:^|[^a-z0-9])(?:deploy|deployment|release)(?:$|[^a-z0-9])/iu,
     /\bwrangler\s+deploy\b/iu,
     /\bnpm\s+(?:run\s+)?deploy\b/iu,
     /\bkubectl\s+(?:apply|rollout)\b/iu,
     /\bdocker(?:\s+compose|\s+stack)?\s+(?:up|deploy)\b/iu,
   ],
   fix: [
-    /(?:^|[_:\s-])(?:fix|repair|patch)(?:$|[_:\s-])/iu,
+    /(?:^|[^a-z0-9])(?:fix|repair|patch)(?:$|[^a-z0-9])/iu,
     /\bapply[_-]?patch\b/iu,
     /(?:\u4fee\u590d|\u8865\u4e01)/u,
   ],
   install: [
-    /(?:^|[_:\s-])(?:install|installer|setup)(?:$|[_:\s-])/iu,
+    /(?:^|[^a-z0-9])(?:install|installer|setup)(?:$|[^a-z0-9])/iu,
     /\b(?:apt(?:-get)?|dnf|yum|pip\d*|npm|pnpm|yarn|winget|choco)\s+install\b/iu,
     /(?:\u5b89\u88c5)/u,
   ],
   verify: [
-    /(?:^|[_:\s-])(?:verify|validate|tests?|checks?|health|doctor|audit|inspect|read|view|stat)(?:$|[_:\s-])/iu,
+    /(?:^|[^a-z0-9])(?:verify|validate|tests?|checks?|health|doctor|audit|inspect|read|view|stat)(?:$|[^a-z0-9])/iu,
     /\b(?:go|npm|pnpm|yarn|cargo|pytest|vitest)\s+(?:run\s+)?test\b/iu,
     /\bcurl\b[^\r\n]{0,160}\b(?:health|status|ready)\b/iu,
     /(?:\u9a8c\u8bc1|\u6d4b\u8bd5|\u68c0\u67e5|\u5ba1\u8ba1)/u,
   ],
   upload: [
-    /(?:^|[_:\s-])(?:upload|publish|push|sync)(?:$|[_:\s-])/iu,
+    /(?:^|[^a-z0-9])(?:upload|publish|push|sync)(?:$|[^a-z0-9])/iu,
     /\bgit\s+push\b/iu,
     /\b(?:scp|rsync|rclone)\b/iu,
     /\baws\s+s3\s+(?:cp|sync)\b/iu,
     /(?:\u4e0a\u4f20|\u53d1\u5e03|\u63a8\u9001|\u540c\u6b65)/u,
   ],
   delete: [
-    /(?:^|[_:\s-])(?:delete|remove|cleanup|clean|purge)(?:$|[_:\s-])/iu,
+    /(?:^|[^a-z0-9])(?:delete|remove|cleanup|clean|purge)(?:$|[^a-z0-9])/iu,
     /(?:^|[;&|\s])rm\s+(?:-[^\s]+\s+)*(?:--\s+)?[^\s]/iu,
     /\bRemove-Item\b/iu,
     /(?:\u5220\u9664|\u79fb\u9664|\u6e05\u7406)/u,
   ],
   create: [
-    /(?:^|[_:\s-])(?:create|provision|scaffold|mkdir)(?:$|[_:\s-])/iu,
+    /(?:^|[^a-z0-9])(?:create|provision|scaffold|mkdir)(?:$|[^a-z0-9])/iu,
     /\b(?:mkdir|New-Item)\b/iu,
     /(?:\u521b\u5efa|\u65b0\u5efa)/u,
   ],
   configure: [
-    /(?:^|[_:\s-])(?:configure|config|edit|write|update|modify|save|set)(?:$|[_:\s-])/iu,
+    /(?:^|[^a-z0-9])(?:configure|config|edit|write|update|modify|save|set)(?:$|[^a-z0-9])/iu,
     /\b(?:Set-Content|Add-Content)\b/iu,
     /(?:\u914d\u7f6e|\u4fee\u6539|\u66f4\u65b0|\u4fdd\u5b58)/u,
   ],
   start: [
-    /(?:^|[_:\s-])(?:start|restart|launch|run_service)(?:$|[_:\s-])/iu,
+    /(?:^|[^a-z0-9])(?:start|restart|launch|run_service)(?:$|[^a-z0-9])/iu,
     /\bsystemctl\s+(?:start|restart|reload)\b/iu,
     /\bStart-Service\b/iu,
     /(?:\u542f\u52a8|\u91cd\u542f|\u91cd\u8f7d)/u,
@@ -224,31 +225,42 @@ const claimPatterns: Readonly<Record<CompletionAction, readonly RegExp[]>> = {
   ],
 };
 
-function safeOperationText(record: CompletionEvidenceRecord): string {
-  let argumentsText = "";
-  if (typeof record.normalizedArguments === "string") {
-    argumentsText = record.normalizedArguments;
-  } else if (typeof record.arguments === "string") {
-    argumentsText = record.arguments;
-  } else if (record.arguments !== undefined) {
-    try {
-      argumentsText = JSON.stringify(record.arguments);
-    } catch {
-      argumentsText = "";
+function operationArgumentText(value: unknown, seen = new Set<object>()): string {
+  if (typeof value === "string") {
+    const trimmed = value.trim();
+    if ((trimmed.startsWith("{") && trimmed.endsWith("}")) || (trimmed.startsWith("[") && trimmed.endsWith("]"))) {
+      try {
+        return operationArgumentText(JSON.parse(trimmed), seen);
+      } catch {
+        // A shell command can legitimately start with a brace; keep it verbatim.
+      }
     }
+    return value;
   }
+  if (["number", "boolean", "bigint"].includes(typeof value)) return String(value);
+  if (!value || typeof value !== "object" || seen.has(value)) return "";
+  seen.add(value);
+  const entries = Array.isArray(value) ? value : Object.entries(value).flatMap(([key, item]) => [key, item]);
+  return entries.map((item) => operationArgumentText(item, seen)).filter(Boolean).join("\n");
+}
+
+function safeOperationText(record: CompletionEvidenceRecord): string {
+  const argumentsText = operationArgumentText(record.arguments ?? record.normalizedArguments ?? "");
   // This value is used transiently for classification only and is never
   // returned, persisted, logged, or included in an error.
   return `${record.name ?? ""}\n${argumentsText}`.slice(0, 8_192);
 }
 
-function classifyOperation(record: CompletionEvidenceRecord): OperationalAction[] {
+export function classifyCompletionActions(record: CompletionEvidenceRecord): OperationalAction[] {
   const operation = safeOperationText(record);
-  const actions: OperationalAction[] = [];
-  for (const action of operationalActions) {
-    if (operationPatterns[action].some((pattern) => pattern.test(operation))) actions.push(action);
+  const actions = new Set<OperationalAction>();
+  for (const hint of record.operationHints ?? []) {
+    if (operationalActions.includes(hint)) actions.add(hint);
   }
-  return actions;
+  for (const action of operationalActions) {
+    if (operationPatterns[action].some((pattern) => pattern.test(operation))) actions.add(action);
+  }
+  return [...actions];
 }
 
 function compactResultText(result: unknown): string {
@@ -316,7 +328,7 @@ export function summarizeCompletionEvidence(
     else if (status === "failure") summary.failedTools += 1;
     else summary.unknownTools += 1;
 
-    const actions = classifyOperation(record);
+    const actions = classifyCompletionActions(record);
     if (status === "success" && actions.length > 0) summary.classifiedSuccessfulTools += 1;
     if (status === "failure" && actions.length > 0) summary.classifiedFailedTools += 1;
     if (status === "failure" && actions.length === 0) summary.unclassifiedFailedTools += 1;
@@ -325,7 +337,7 @@ export function summarizeCompletionEvidence(
   }
 
   for (const record of ledger.pending ?? []) {
-    for (const action of classifyOperation(record)) updateActionEvidence(summary.actions, action, "pending");
+    for (const action of classifyCompletionActions(record)) updateActionEvidence(summary.actions, action, "pending");
   }
 
   return summary;

@@ -37,6 +37,7 @@ import {
 
 const encoder = new TextEncoder();
 const STREAM_HEARTBEAT_MS = 5_000;
+const STREAM_PREFLIGHT_GRACE_MS = 250;
 const LOGICAL_REQUEST_TIMEOUT_MS = 10 * 60_000;
 const DEFAULT_REQUEST_TOKEN_BUDGET = 96_000;
 const PROMPT_PROTOCOL_RESERVE_TOKENS = 2_048;
@@ -2252,7 +2253,7 @@ function responsesStream(
   return new Response(stream, { headers: streamHeaders() });
 }
 
-async function responses(request: Request, env: Env, metrics?: RequestMetricTracker): Promise<Response> {
+async function responsesCore(request: Request, env: Env, metrics?: RequestMetricTracker): Promise<Response> {
   const deadlineAt = logicalRequestDeadlineAt();
   const parsed = await body<ResponsesBody>(request);
   if (!parsed || typeof parsed !== "object") throw new Error("INVALID_REQUEST");
@@ -2385,6 +2386,105 @@ async function responses(request: Request, env: Env, metrics?: RequestMetricTrac
     await abandonUnseenTurn(session, lease.leaseId);
     throw cause;
   }
+}
+
+async function delayedResponseFailure(response: Response): Promise<{ code: string; message: string }> {
+  try {
+    const value = await response.clone().json() as { error?: { code?: unknown; message?: unknown } };
+    const code = typeof value?.error?.code === "string" && value.error.code ? value.error.code : "upstream_error";
+    const message = typeof value?.error?.message === "string" && value.error.message
+      ? value.error.message
+      : `request failed with HTTP ${response.status}`;
+    return { code, message };
+  } catch {
+    return { code: "upstream_error", message: `request failed with HTTP ${response.status}` };
+  }
+}
+
+/**
+ * A Responses request can spend time in Durable Object session acquisition,
+ * portable-state restoration, and account routing before responsesStream()
+ * exists. During that interval there were no response headers or bytes for the
+ * client to observe, so Codex's normal SSE idle timer could expire even though
+ * the Worker was still progressing. Open an SSE bridge after a short grace
+ * period and emit transport-only comments until the real stream is ready.
+ */
+function bridgePendingResponsesStream(pending: Promise<Response>): Response {
+  let closed = false;
+  let heartbeat: ReturnType<typeof setInterval> | undefined;
+  let reader: ReadableStreamDefaultReader<Uint8Array> | undefined;
+  const stream = new ReadableStream<Uint8Array>({
+    start(controller) {
+      const send = (chunk: string | Uint8Array): void => {
+        if (closed) return;
+        try {
+          controller.enqueue(typeof chunk === "string" ? encoder.encode(chunk) : chunk);
+        } catch {
+          closed = true;
+        }
+      };
+      send(": responses-preflight\n\n");
+      heartbeat = setInterval(() => send(": keep-alive\n\n"), STREAM_HEARTBEAT_MS);
+      const pump = (async () => {
+        try {
+          const response = await pending;
+          if (heartbeat) clearInterval(heartbeat);
+          heartbeat = undefined;
+          const contentType = response.headers.get("Content-Type")?.toLowerCase() ?? "";
+          if (!response.ok || !response.body || !contentType.startsWith("text/event-stream")) {
+            const failure = await delayedResponseFailure(response);
+            send(`event: error\ndata: ${JSON.stringify({ type: "error", code: failure.code, message: failure.message })}\n\n`);
+            send("data: [DONE]\n\n");
+            return;
+          }
+          reader = response.body.getReader();
+          while (!closed) {
+            const next = await reader.read();
+            if (next.done) break;
+            send(next.value);
+          }
+        } catch (cause) {
+          const failure = publicFailure(cause);
+          send(`event: error\ndata: ${JSON.stringify({ type: "error", code: failure.code, message: failure.message })}\n\n`);
+          send("data: [DONE]\n\n");
+        } finally {
+          if (heartbeat) clearInterval(heartbeat);
+          heartbeat = undefined;
+          if (!closed) {
+            try { controller.close(); } catch { /* downstream already disconnected */ }
+            closed = true;
+          }
+        }
+      })();
+      waitUntil(pump);
+    },
+    async cancel() {
+      closed = true;
+      if (heartbeat) clearInterval(heartbeat);
+      heartbeat = undefined;
+      try { await reader?.cancel(); } catch { /* upstream already closed */ }
+    },
+  });
+  return new Response(stream, { headers: streamHeaders() });
+}
+
+async function responses(request: Request, env: Env, metrics?: RequestMetricTracker): Promise<Response> {
+  let streaming = false;
+  try {
+    const value = await request.clone().json() as { stream?: unknown };
+    streaming = value?.stream === true;
+  } catch {
+    // Let responsesCore preserve the normal invalid-body error contract.
+  }
+  if (!streaming) return await responsesCore(request, env, metrics);
+
+  const pending = responsesCore(request, env, metrics);
+  const marker = Symbol("responses-preflight-pending");
+  const quick = await Promise.race<Response | symbol>([
+    pending,
+    new Promise<symbol>((resolve) => setTimeout(() => resolve(marker), STREAM_PREFLIGHT_GRACE_MS)),
+  ]);
+  return quick === marker ? bridgePendingResponsesStream(pending) : quick as Response;
 }
 
 export function imageGenerationData(

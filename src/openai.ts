@@ -200,7 +200,15 @@ function validateTools(tools: unknown[] | undefined): void {
   for (const raw of tools) {
     if (!raw || typeof raw !== "object" || Array.isArray(raw)) throw new Error("INVALID_TOOLS");
     const tool = raw as { type?: unknown; name?: unknown; function?: unknown };
-    if (tool.type !== undefined && tool.type !== "function") throw new Error("INVALID_TOOLS");
+    // Codex sends function tools alongside custom apply_patch, deferred
+    // namespaces, and hosted web_search declarations.  Those non-function
+    // tools are valid Responses API input even though this gateway can only
+    // round-trip caller-executed function calls today.  Validate their type
+    // envelope here, then exclude them from the ChatHub client-plugin list.
+    if (tool.type !== undefined && tool.type !== "function") {
+      if (typeof tool.type !== "string" || !tool.type.trim()) throw new Error("INVALID_TOOLS");
+      continue;
+    }
     const fn = tool.function && typeof tool.function === "object" && !Array.isArray(tool.function)
       ? tool.function as { name?: unknown }
       : tool;
@@ -208,6 +216,28 @@ function validateTools(tools: unknown[] | undefined): void {
     if (!name || name.length > 128 || names.has(name)) throw new Error("INVALID_TOOLS");
     names.add(name);
   }
+}
+
+function routableFunctionTools(tools: unknown[] | undefined): unknown[] | undefined {
+  const filtered = tools?.filter((raw) => {
+    if (!raw || typeof raw !== "object" || Array.isArray(raw)) return false;
+    const type = (raw as { type?: unknown }).type;
+    return type === undefined || type === "function";
+  });
+  return filtered?.length ? filtered : undefined;
+}
+
+function explicitClientExecRequest(input: unknown, tools: unknown[] | undefined, choice: unknown): boolean {
+  if (String(choice ?? "auto").toLowerCase() !== "auto") return false;
+  if (!toolNames(tools).includes("exec_command") || functionOutputs(input).length > 0) return false;
+  let lastUserText = typeof input === "string" ? input : "";
+  if (Array.isArray(input)) {
+    for (const raw of input) {
+      const item = raw as Record<string, unknown>;
+      if (String(item?.role ?? "").toLowerCase() === "user") lastUserText = contentText(item.content);
+    }
+  }
+  return /(?:\b(?:call|use|run|execute)\b[^\n]{0,120}\bexec_command\b|\bexec_command\b[^\n]{0,120}\b(?:call|use|run|execute)\b|(?:登录|修复|部署|检查|读取|修改|写入|执行)[^\n]{0,160}(?:服务器|目录|文件|日志|命令|PowerShell|SSH)|(?:[A-Za-z]:\\|\\\\)[^\n]{1,240})/iu.test(lastUserText);
 }
 
 function validateParallelToolMode(value: boolean | undefined): void {
@@ -1489,6 +1519,11 @@ function toolRoutingEnabled(tools: unknown[] | undefined, toolChoice: unknown): 
   return Boolean(tools?.length) && String(toolChoice ?? "auto").toLowerCase() !== "none";
 }
 
+function isHostedExecutionSubstitution(text: string, tools: unknown[] | undefined, ledger: ToolLedger): boolean {
+  if (ledger.completed.length > 0 || !toolNames(tools).includes("exec_command")) return false;
+  return /(?:\/bin\/(?:ba)?sh|powershell\s*:\s*command not found|powershell[^\n]{0,80}(?:not installed|not found)|未安装\s*PowerShell|Linux\s*(?:container|容器|工具环境)|hosted\s+(?:shell|container))/iu.test(text);
+}
+
 type AssistantTurnResolution =
   | { kind: "upstream"; call: FunctionCall | null; result: ChatHubResult }
   | { kind: "terminal"; text: string };
@@ -1573,6 +1608,29 @@ async function resolveAssistantTurn(
       return { kind: "terminal", text: result.text.startsWith(toolRecoveryTermination())
         ? result.text
         : toolRecoveryTermination(guarded.rejection?.publicMessage) };
+    }
+
+    // M365 occasionally substitutes its own hosted Linux shell even though
+    // Codex declared exec_command as a caller-side Windows function.  Never
+    // expose that fabricated execution as an answer.  Perform one isolated,
+    // named routing repair that can only yield the client's exec_command.
+    if (isHostedExecutionSubstitution(result.text, tools, ledger)) {
+      const recovered = await resolveFunctionCall(
+        env,
+        account,
+        result,
+        `${prompt}\n\nHOSTED EXECUTION SUBSTITUTION DETECTED: Ignore the hosted shell result. Return a caller-side exec_command request for the still-pending action.`,
+        tone,
+        tools,
+        { type: "function", name: "exec_command" },
+        ledger,
+        signal,
+        gateLifecycle,
+        deadlineAt,
+        metrics,
+      );
+      if (recovered) return { kind: "upstream", call: recovered, result };
+      return { kind: "terminal", text: toolRecoveryTermination("hosted execution was rejected and a local exec_command call could not be generated") };
     }
 
     if (required) {
@@ -1818,6 +1876,7 @@ async function chatCompletions(request: Request, env: Env, metrics?: RequestMetr
   validateTools(parsed.tools);
   validateParallelToolMode(parsed.parallel_tool_calls);
   validateToolChoice(parsed.tool_choice, parsed.tools);
+  parsed.tools = routableFunctionTools(parsed.tools);
   const model = canonicalModel(parsed.model);
   const tone = modelTone(model, parsed.reasoning_effort ?? "");
   const session = chatSession(env, await chatSessionKey(request, parsed));
@@ -2001,13 +2060,11 @@ export function responsesContinuationOutputIssue(
   if (!Array.isArray(input)) return pendingCallId ? "tool_output_mismatch" : null;
   const outputs = functionOutputs(input);
   const callIndexes = new Map<string, number>();
-  let lastUserIndex = -1;
   for (let index = 0; index < input.length; index += 1) {
     const item = input[index] as Record<string, unknown>;
     if (item?.type === "function_call" && typeof item.call_id === "string" && !callIndexes.has(item.call_id)) {
       callIndexes.set(item.call_id, index);
     }
-    if (String(item?.role ?? "").toLowerCase() === "user") lastUserIndex = index;
   }
 
   if (pendingCallId) {
@@ -2024,11 +2081,14 @@ export function responsesContinuationOutputIssue(
     return null;
   }
 
+  // A stateless Responses continuation is self-contained: Codex replays each
+  // function_call directly before its function_call_output and may omit both
+  // previous_response_id and a stable session key.  Accept that causal pair;
+  // the tool ledger below still rejects orphaned, duplicated, or mismatched
+  // evidence and prevents the completed action from being reissued.
   for (const output of outputs) {
     const callIndex = callIndexes.get(output.callId);
-    if (lastUserIndex < 0 || callIndex === undefined || callIndex >= output.index || output.index >= lastUserIndex) {
-      return "tool_output_already_consumed";
-    }
+    if (callIndex === undefined || callIndex >= output.index) return "tool_output_mismatch";
   }
   return null;
 }
@@ -2200,6 +2260,10 @@ async function responses(request: Request, env: Env, metrics?: RequestMetricTrac
   validateTools(parsed.tools);
   validateParallelToolMode(parsed.parallel_tool_calls);
   validateToolChoice(parsed.tool_choice, parsed.tools);
+  parsed.tools = routableFunctionTools(parsed.tools);
+  if (explicitClientExecRequest(parsed.input, parsed.tools, parsed.tool_choice)) {
+    parsed.tool_choice = { type: "function", name: "exec_command" };
+  }
   const model = canonicalModel(parsed.model);
   const tone = modelTone(model, parsed.reasoning?.effort ?? "");
   const responseId = `resp_${crypto.randomUUID().replaceAll("-", "")}`;
@@ -2215,11 +2279,12 @@ async function responses(request: Request, env: Env, metrics?: RequestMetricTrac
     return apiError(404, "previous_response_not_found", "previous_response_id is unknown or expired");
   }
   const outputs = functionOutputs(parsed.input);
-  if (!parsed.previous_response_id && outputs.length > 0) {
-    await session.release(lease.leaseId);
-    return apiError(400, "unexpected_tool_output", "function_call_output requires previous_response_id");
-  }
-  if (parsed.previous_response_id) {
+  // Codex CLI 0.150 uses the stateless Responses form: it replays the emitted
+  // function_call beside its function_call_output and keeps the logical
+  // session via prompt_cache_key, without sending previous_response_id.  Both
+  // stateful and stateless continuations must pass the same pending call-id
+  // validation before the result is accepted.
+  if (outputs.length > 0) {
     const issue = responsesContinuationOutputIssue(parsed.input, lease.pendingCallId);
     if (issue === "tool_output_mismatch") {
       await session.release(lease.leaseId);
@@ -2230,6 +2295,7 @@ async function responses(request: Request, env: Env, metrics?: RequestMetricTrac
       return apiError(409, issue, "this response is not waiting for a tool output");
     }
   }
+  const statelessToolContinuation = outputs.length > 0 && Boolean(lease.pendingCallId);
   let ledger: ToolLedger;
   let prompt: string;
   let currentTurnPrompt: string;
@@ -2238,7 +2304,7 @@ async function responses(request: Request, env: Env, metrics?: RequestMetricTrac
   let promptTokenLimit = 0;
   try {
     const activeInput = selectActiveResponsesInput(parsed.input, lease.started, {
-      previousResponse: Boolean(parsed.previous_response_id),
+      previousResponse: Boolean(parsed.previous_response_id) || statelessToolContinuation,
       pendingCallId: lease.pendingCallId,
     });
     const prepared = prepareResponsesMultimodal(activeInput);

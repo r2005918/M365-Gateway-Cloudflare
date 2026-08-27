@@ -260,10 +260,10 @@ function toolProtocolPrompt(text: string, tools: unknown[] = [], choice: unknown
   const mode = explicit ? `named:${explicit}` : String(choice ?? "auto").toLowerCase();
   return `You are an execution agent. The tools below are real client-side tools exposed by the caller, not hypothetical M365 plugins.
 The Cloudflare Worker is a server-only relay: it has no shell, Linux container, Windows filesystem, desktop, or process-launch capability. The caller's local tool runtime is the only permitted execution target.
-Use the native client-tool channel as the primary mechanism. If that channel is unavailable and a tool is needed, emit ONLY one fenced block whose info string is the exact tool name and whose body is a JSON object of arguments. Do not wrap a call in XML or explanatory prose.
+Use the native client-tool channel as the primary mechanism. If that channel is unavailable and a tool is needed, the compatibility call is mandatory: emit ONLY one fenced block whose info string is the exact tool name and whose body is a JSON object of arguments. The fenced block requests execution by the caller; it does not execute anything. Do not wrap a call in XML or explanatory prose.
 MODE auto: call one tool only when external information or action is still required; otherwise answer the user directly.
 MODE required: call one valid tool. MODE named:function_name: call that exact tool.
-Never substitute a Microsoft-hosted computer, search, Linux container, shell, or filesystem for a caller tool. Treat caller tool results in the request as authoritative. Do not infer that a caller path, credential, host, or command is missing or failed without a matching tool result. If the caller's native tool channel is unavailable (as opposed to merely awaiting a result), output exactly CLIENT_TOOL_UNAVAILABLE and stop; do not execute, simulate, or claim completion. Wait for the client tool result before claiming completion.
+Never substitute a Microsoft-hosted computer, search, Linux container, shell, or filesystem for a caller tool. Treat caller tool results in the request as authoritative. Do not infer that a caller path, credential, host, or command is missing or failed without a matching tool result. Native-channel absence is not a reason to answer CLIENT_TOOL_UNAVAILABLE when a fenced compatibility call can be emitted. Output exactly CLIENT_TOOL_UNAVAILABLE only if neither the native channel nor a valid fenced compatibility call can represent the required call. Never execute, simulate, or claim completion before the caller returns a matching tool result.
 
 TOOL_MODE: ${mode}
 
@@ -284,6 +284,12 @@ ${text}`;
 // only emit fenced calls.
 export function clientPlugins(tools: unknown[] = []): Array<Record<string, unknown>> {
   const plugins: Array<Record<string, unknown>> = [];
+  // These tools must execute on the caller. Registering their familiar names
+  // in M365's native plugin list can make ChatHub bind them to a hosted Linux
+  // shell or filesystem. Keep them in toolProtocolPrompt for the fenced-call
+  // compatibility path, which the gateway converts back into a Responses
+  // function_call for Codex to execute locally.
+  const compatibilityOnly = new Set(["exec_command", "write_stdin", "view_image"]);
   for (const raw of tools) {
     if (!raw || typeof raw !== "object") continue;
     const tool = raw as {
@@ -295,6 +301,7 @@ export function clientPlugins(tools: unknown[] = []): Array<Record<string, unkno
     };
     const fn = tool.function && typeof tool.function === "object" ? tool.function : tool;
     if (typeof fn.name !== "string" || !fn.name.trim()) continue;
+    if (compatibilityOnly.has(fn.name.trim())) continue;
     plugins.push({
       Id: fn.name.trim(),
       Source: "Client",

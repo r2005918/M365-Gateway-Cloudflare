@@ -2,7 +2,7 @@ import { ChatSession } from "./chat-session";
 import { anthropicErrorResponse, anthropicRequest } from "./anthropic";
 import { authorizationURL, exchangeCode } from "./oauth";
 import { openAIRequest } from "./openai";
-import { modelCatalog } from "./models";
+import { codexModelCatalog, modelCatalog } from "./models";
 import {
   ACCOUNT_MIGRATION_PATH,
   MigrationRequestError,
@@ -360,6 +360,7 @@ async function openAI(
     return error(401, "auth_error", "valid API key required");
   }
   if (url.pathname === "/v1/models" && request.method === "GET") {
+    if (url.searchParams.has("client_version")) return json(codexModelCatalog());
     return json({ object: "list", data: modelCatalog() });
   }
   if (url.pathname === "/v1/messages") return anthropicRequest(request, env, openAIRequest, metrics);

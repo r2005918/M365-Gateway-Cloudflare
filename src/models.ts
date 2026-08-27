@@ -147,3 +147,51 @@ export function modelCatalog(): Record<string, unknown>[] {
     },
   }));
 }
+
+/** Codex CLI uses its own model-capability manifest when it requests
+ * `/models?client_version=...`.  Returning only the standard OpenAI `data`
+ * list makes the CLI fall back to metadata with shell execution disabled, so
+ * it silently omits exec_command/write_stdin from subsequent Responses calls.
+ */
+export function codexModelCatalog(): { models: Record<string, unknown>[] } {
+  const reasoningLevels = ["low", "medium", "high", "xhigh", "max"].map((effort) => ({
+    effort,
+    description: `${effort} reasoning`,
+  }));
+  return {
+    models: MODELS.map((model, index) => ({
+      slug: model.id,
+      display_name: model.id,
+      description: "M365 Gateway model for Codex CLI",
+      default_reasoning_level: "medium",
+      supported_reasoning_levels: model.id === "gpt-5.6-sol"
+        ? [...reasoningLevels, { effort: "ultra", description: "ultra reasoning" }]
+        : reasoningLevels,
+      shell_type: "unified_exec",
+      visibility: "list",
+      supported_in_api: true,
+      priority: index + 1,
+      availability_nux: null,
+      upgrade: null,
+      include_skills_usage_instructions: false,
+      include_plugin_usage_instructions: false,
+      include_apps_usage_instructions: false,
+      support_verbosity: true,
+      default_verbosity: "low",
+      apply_patch_tool_type: "freeform",
+      truncation_policy: { mode: "tokens", limit: 10_000 },
+      supports_image_detail_original: false,
+      context_window: model.contextWindow,
+      max_context_window: model.contextWindow,
+      auto_compact_token_limit: Math.floor(model.contextWindow * 0.9),
+      experimental_supported_tools: [],
+      input_modalities: ["text"],
+      supports_search_tool: false,
+      use_responses_lite: false,
+      node_repl_auto_review_required: false,
+      node_repl_disabled: false,
+      tool_mode: "direct",
+      base_instructions: "You are Codex. Use the caller-provided local tools for filesystem access and command execution. Never simulate a tool result or substitute a hosted shell for the caller's environment.",
+    })),
+  };
+}

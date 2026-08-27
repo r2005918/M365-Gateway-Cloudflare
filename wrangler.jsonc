@@ -16,7 +16,7 @@
   "kv_namespaces": [
     {
       "binding": "SENSITIVE_KV",
-      "id": "00000000000000000000000000000000"
+      "id": "d047fc1ff026402aaa7effa33080019b"
     }
   ],
   "durable_objects": {
